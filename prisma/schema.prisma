@@ -1,0 +1,245 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite" // switch to "postgresql" for production; the schema is portable
+  url      = env("DATABASE_URL")
+}
+
+// Enum-like columns are plain strings (SQLite has no native enums).
+// Allowed values live in src/lib/enums.ts and are validated at the API boundary.
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  phone        String?
+  city         String   @default("Addis Ababa")
+  passwordHash String
+  role         String   @default("ATTENDEE") // ATTENDEE | ORGANIZER | ADMIN
+  status       String   @default("ACTIVE") // ACTIVE | SUSPENDED
+  prefs        String   @default("{\"smsReminder\":true,\"emailFollowed\":true,\"weeklyPicks\":false}")
+  createdAt    DateTime @default(now())
+
+  organizer Organizer?
+  orders    Order[]
+  tickets   Ticket[]        @relation("TicketOwner")
+  checkIns  Ticket[]        @relation("CheckedInBy")
+  reports   Report[]
+  saved     SavedEvent[]
+  logs      ModerationLog[]
+}
+
+model Organizer {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  name             String
+  slug             String   @unique
+  description      String   @default("")
+  verified         Boolean  @default(false)
+  status           String   @default("PENDING") // PENDING | VERIFIED | SUSPENDED
+  verificationNote String   @default("")
+  payoutBank       String?
+  payoutAccount    String?
+  payoutVerified   Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events Event[]
+}
+
+model Event {
+  id               String    @id @default(cuid())
+  organizerId      String
+  slug             String    @unique
+  title            String
+  category         String    @default("Music")
+  summary          String    @default("")
+  description      String    @default("")
+  venueName        String    @default("")
+  venueAddress     String    @default("")
+  city             String    @default("Addis Ababa")
+  startsAt         DateTime
+  endsAt           DateTime?
+  gatesAt          DateTime?
+  ageLimit         Int       @default(0)
+  capacity         Int       @default(0)
+  status           String    @default("DRAFT") // DRAFT | PENDING_REVIEW | PUBLISHED | REJECTED | CANCELLED
+  reviewReason     String    @default("") // shown to the organizer after a moderation decision
+  flag             String    @default("") // why this event is in the admin review queue
+  coverPreset      String    @default("sunburst")
+  coverText        String    @default("")
+  lineup           String    @default("[]") // JSON: [{time, name, note, headline}]
+  info             String    @default("{}") // JSON: {entry, refunds, accessibility, gettingThere}
+  refundUntil      DateTime?
+  salesEnd         DateTime?
+  previousStartsAt DateTime?
+  cancelledAt      DateTime?
+  submittedAt      DateTime? // when it entered the review queue
+  publishedAt      DateTime?
+  featured         Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  organizer   Organizer       @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  ticketTypes TicketType[]
+  orders      Order[]
+  tickets     Ticket[]
+  views       EventView[]
+  reports     Report[]
+  waitlist    WaitlistEntry[]
+  saved       SavedEvent[]
+  logs        ModerationLog[]
+
+  @@index([status, startsAt])
+  @@index([organizerId])
+}
+
+model TicketType {
+  id          String    @id @default(cuid())
+  eventId     String
+  name        String
+  kind        String    @default("PAID") // PAID | FREE | PWYW
+  price       Int       @default(0) // whole ETB, buyer-facing all-in price
+  quantity    Int       @default(0)
+  description String    @default("")
+  perOrderMax Int       @default(6)
+  saleStart   DateTime?
+  saleEnd     DateTime?
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+
+  event   Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  tickets Ticket[]
+
+  @@index([eventId])
+}
+
+model Order {
+  id            String    @id @default(cuid())
+  code          String    @unique // TM-48213
+  userId        String?
+  eventId       String
+  name          String    @default("")
+  email         String    @default("")
+  phone         String    @default("")
+  status        String    @default("PENDING") // PENDING | PAID | EXPIRED | REFUNDED
+  total         Int       @default(0)
+  paymentMethod String? // TELEBIRR | CBE_BIRR | CARD | FREE
+  paymentRef    String?
+  paymentError  String?
+  source        String    @default("direct")
+  holdExpiresAt DateTime
+  paidAt        DateTime?
+  refundedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  user          User?          @relation(fields: [userId], references: [id])
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  tickets       Ticket[]
+  refundRequest RefundRequest?
+
+  @@index([eventId, status])
+  @@index([userId])
+}
+
+model Ticket {
+  id            String    @id @default(cuid())
+  code          String    @unique // TMS-7K4Q-92XD
+  orderId       String
+  eventId       String
+  ticketTypeId  String
+  ownerId       String?
+  seq           Int       @default(1)
+  price         Int       @default(0)
+  holderName    String    @default("")
+  holderContact String    @default("")
+  status        String    @default("HELD") // HELD | VALID | CHECKED_IN | REFUNDED
+  checkedInAt   DateTime?
+  checkedInById String?
+  gate          String?
+  rescheduleAck Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+
+  order       Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  event       Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  ticketType  TicketType @relation(fields: [ticketTypeId], references: [id], onDelete: Cascade)
+  owner       User?      @relation("TicketOwner", fields: [ownerId], references: [id])
+  checkedInBy User?      @relation("CheckedInBy", fields: [checkedInById], references: [id])
+
+  @@index([eventId, status])
+  @@index([orderId])
+  @@index([ownerId])
+}
+
+model RefundRequest {
+  id        String    @id @default(cuid())
+  orderId   String    @unique
+  reason    String    @default("")
+  status    String    @default("PENDING") // PENDING | APPROVED | DECLINED
+  createdAt DateTime  @default(now())
+  decidedAt DateTime?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model EventView {
+  id      String   @id @default(cuid())
+  eventId String
+  source  String   @default("direct")
+  at      DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId, at])
+}
+
+model SavedEvent {
+  userId  String
+  eventId String
+  at      DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([userId, eventId])
+}
+
+model WaitlistEntry {
+  id      String   @id @default(cuid())
+  eventId String
+  phone   String
+  at      DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, phone])
+}
+
+model Report {
+  id         String    @id @default(cuid())
+  eventId    String
+  reporterId String?
+  reason     String
+  details    String    @default("")
+  status     String    @default("OPEN") // OPEN | RESOLVED | DISMISSED
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  event    Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  reporter User? @relation(fields: [reporterId], references: [id])
+}
+
+model ModerationLog {
+  id          String   @id @default(cuid())
+  adminId     String
+  eventId     String?
+  organizerId String?
+  action      String
+  note        String   @default("")
+  createdAt   DateTime @default(now())
+
+  admin User   @relation(fields: [adminId], references: [id])
+  event Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+}

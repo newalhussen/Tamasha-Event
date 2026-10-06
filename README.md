@@ -1,92 +1,99 @@
-# Tamasha: events and ticketing for Addis Ababa
+# Tamasha — Event Management & Ticketing Platform
 
-Event discovery, ticket checkout, QR tickets, organizer tools and an admin console, with Ethiopian seed data (Addis Ababa venues, ETB prices, Telebirr / CBE Birr).
+Tamasha is a full-stack event management and ticketing platform designed for discovering events, purchasing tickets, and managing events and attendees.
 
-Two apps, one repo:
+## Features
 
-| | Stack | Folder |
-|---|---|---|
-| **Frontend** | Next.js 15 (App Router), TypeScript, Tailwind v4 | `frontend/` |
-| **Backend API** | Node.js, Express 5, TypeScript, Prisma, **PostgreSQL**, zod | `backend/` |
+* Event discovery, search, and filtering
+* Event details and ticket selection
+* Ticket checkout and order management
+* Digital QR tickets and check-in
+* Organizer event and ticket management
+* Attendee management and analytics
+* Admin moderation
+* Role-based access control
+* Ticket availability protection against overselling
+* Refund and event cancellation handling
 
+## Tech Stack
+
+**Frontend**
+
+* Next.js 15
+* TypeScript
+* Tailwind CSS
+
+**Backend**
+
+* Node.js
+* Express 5
+* TypeScript
+* Prisma
+* PostgreSQL
+* Zod
+
+## Architecture
+
+```text
+Browser
+   ↓
+Next.js Frontend (:3000)
+   ↓ /api/* proxy
+Express API (:4000)
+   ↓
+Prisma
+   ↓
+PostgreSQL
 ```
-Browser ──► Next.js (:3000) ──/api/* proxy──► Express API (:4000) ──► PostgreSQL
-              pages + UI          same-origin cookie     controllers → services → Prisma
-```
 
-The browser only talks to the frontend. Next.js proxies `/api/*` to the backend (`frontend/next.config.ts`), so the session cookie is first-party and there is no CORS to manage. Server-rendered pages call the API with the visitor's cookie forwarded (`frontend/src/lib/server-api.ts`).
+The frontend and backend are separated into independent applications. Next.js proxies API requests to the backend so authentication remains same-origin.
 
-## Run it
+## Getting Started
 
-You need Node 20+ and a PostgreSQL 14+ database.
+### Requirements
+
+* Node.js 20+
+* PostgreSQL 14+
+
+### Backend
 
 ```bash
-# 1. Database (any Postgres works; this starts one with Docker)
-docker compose up -d
-
-# 2. Backend
 cd backend
-cp .env.example .env          # set DATABASE_URL and a long random AUTH_SECRET
 npm install
-npm run db:migrate            # applies prisma/migrations to your database
-npm run db:seed               # demo data (safe to re-run; it resets the data)
-npm run dev                   # API on http://localhost:4000/api
+cp .env.example .env
+npm run db:migrate
+npm run db:seed
+npm run dev
+```
 
-# 3. Frontend (second terminal)
+### Frontend
+
+```bash
 cd frontend
-cp .env.example .env          # BACKEND_URL=http://localhost:4000
 npm install
-npm run dev                   # http://localhost:3000
+cp .env.example .env
+npm run dev
 ```
 
-Production: `npm run build && npm start` in each folder; apply migrations with `npm run db:deploy` in `backend/`.
-Tests: `cd backend && npm test` (needs the database; includes a race test proving the last tickets can't be oversold).
+Open **http://localhost:3000**.
 
-## Demo logins
+### Docker
 
-Password for **every** account: `12345678`
+A PostgreSQL instance can also be started with:
 
-| Role | Email | Notes |
-|---|---|---|
-| Admin | `admin@tamasha.et` | Review queue, organizers, users, reports |
-| Organizer (verified) | `dawit@tamasha.et` | Abay Sound Collective: flagship event, a live event for check-in, a draft |
-| Organizer (verified) | `hanna@tamasha.et` | Zema Events: comedy, supper club, film (rescheduled), market, run |
-| Organizer (verified) | `liya@tamasha.et` | Skylight Jazz Club |
-| Organizer (unverified) | `selamawit@tamasha.et`, `yonas@tamasha.et` | Their events need admin approval |
-| Attendee | `meron@tamasha.et` | Upcoming, past, refunded tickets; an unnamed guest ticket; a rescheduled event |
-| Attendee | `abel@tamasha.et`, `hiwot@tamasha.et` | Smaller ticket lists |
-
-## Backend layout
-
-```
-backend/
-  prisma/            schema.prisma, migrations/, seed.ts
-  src/
-    server.ts        starts the HTTP server
-    app.ts           Express app: CORS, JSON, cookies, session, routes, error handling
-    config/env.ts    validated environment (the only place process.env is read)
-    routes/          URL → controller wiring, plus which roles may call what
-    controllers/     thin HTTP layer: validate input, call a service, shape the response
-    validation/      zod schemas for every request body
-    services/        all business rules: holds, orders, refunds, check-in, analytics, moderation…
-    middleware/      session → req.user, role guards, JSON-only mutations, error handler
-    db/prisma.ts     the single Prisma client
-    utils/           errors, constants, formatting, phone and code helpers
-  tests/             unit tests and a PostgreSQL integration test
+```bash
+docker compose up -d
 ```
 
-Rules of the road: controllers never touch the database, services never touch `req`/`res`, and every route is guarded in `routes/index.ts` (`requireAuth`, `requireOrganizer`) with ownership re-checked in services.
+## Testing
 
-Key behaviours: 10-minute ticket holds protected by a row lock (`SELECT … FOR UPDATE` on the event), a 5% platform fee included in the buyer's price, instant refunds inside the organizer's window (otherwise a request the organizer decides), event cancellation refunding everyone, and compare-and-set check-in so two scanners can't admit the same ticket.
+```bash
+cd backend
+npm test
+```
 
-## API at a glance
+The test suite includes concurrency testing to ensure limited ticket inventory cannot be oversold.
 
-`/api/auth/*` sign in/out and the current user · `/api/events` discovery and event pages · `/api/holds`, `/api/orders/:id/*` checkout, payment, refunds · `/api/tickets/*`, `/api/me/tickets` · `/api/organizer/*` events, tickets, attendees, check-in, analytics, orders, payouts · `/api/admin/*` review queue, organizers, users, reports. Errors always look like `{ "error": "…", "code": "…", "fields": { "email": "…" } }`.
+## MVP Notes
 
-## Known limits (out of scope for the MVP)
-
-- **Payments are simulated** (`backend/src/services/payments.service.ts`): a mobile-money number ending in `0000` fails, anything else succeeds. Implement `charge()` against Chapa / Telebirr / CBE Birr and keep card entry on the provider's hosted page.
-- **Email and SMS are only logged** (`backend/src/services/notify.service.ts`). Swap in an SMTP or SMS gateway there.
-- Artwork is a set of generated styles, not image upload; the venue map is a placeholder with a Google Maps link.
-- Add rate limiting (login, holds) at the edge or with a small middleware before going public.
-- Frontend response types in `frontend/src/lib/types.ts` are hand-maintained copies of the API shapes.
+Payments and notifications are currently simulated and can be replaced with real payment and messaging providers. The project is structured to allow these integrations without changing the core business logic.

@@ -1,21 +1,46 @@
-# Tamasha — events and ticketing for Addis Ababa
+# Tamasha: events and ticketing for Addis Ababa
 
-Event discovery, ticket checkout, QR tickets, organizer tools and an admin console.
-UI follows the Tamasha design files; seed data is Ethiopian (Addis Ababa venues, ETB prices, Telebirr / CBE Birr).
+Event discovery, ticket checkout, QR tickets, organizer tools and an admin console, with Ethiopian seed data (Addis Ababa venues, ETB prices, Telebirr / CBE Birr).
 
-**Stack:** Next.js 15 (App Router) · TypeScript · Prisma + SQLite (portable to Postgres) · Tailwind v4 · JWT cookie auth (`jose`, `bcryptjs`) · `zod` validation · `qrcode` (generate) / `jsqr` (scan).
+Two apps, one repo:
+
+| | Stack | Folder |
+|---|---|---|
+| **Frontend** | Next.js 15 (App Router), TypeScript, Tailwind v4 | `frontend/` |
+| **Backend API** | Node.js, Express 5, TypeScript, Prisma, **PostgreSQL**, zod | `backend/` |
+
+```
+Browser ──► Next.js (:3000) ──/api/* proxy──► Express API (:4000) ──► PostgreSQL
+              pages + UI          same-origin cookie     controllers → services → Prisma
+```
+
+The browser only talks to the frontend. Next.js proxies `/api/*` to the backend (`frontend/next.config.ts`), so the session cookie is first-party and there is no CORS to manage. Server-rendered pages call the API with the visitor's cookie forwarded (`frontend/src/lib/server-api.ts`).
 
 ## Run it
 
+You need Node 20+ and a PostgreSQL 14+ database.
+
 ```bash
+# 1. Database (any Postgres works; this starts one with Docker)
+docker compose up -d
+
+# 2. Backend
+cd backend
+cp .env.example .env          # set DATABASE_URL and a long random AUTH_SECRET
 npm install
-cp .env.example .env        # set AUTH_SECRET to a long random string
-npm run db:push             # create the SQLite schema
-npm run db:seed             # load demo data (safe to re-run: it resets the data)
-npm run dev                 # http://localhost:3000
+npm run db:migrate            # applies prisma/migrations to your database
+npm run db:seed               # demo data (safe to re-run; it resets the data)
+npm run dev                   # API on http://localhost:4000/api
+
+# 3. Frontend (second terminal)
+cd frontend
+cp .env.example .env          # BACKEND_URL=http://localhost:4000
+npm install
+npm run dev                   # http://localhost:3000
 ```
 
-`npm run db:reset` wipes and reseeds. `npm test` runs unit tests, `npm run lint` type-checks, `npm run build` makes a production build.
+Production: `npm run build && npm start` in each folder; apply migrations with `npm run db:deploy` in `backend/`.
+Tests: `cd backend && npm test` (needs the database; includes a race test proving the last tickets can't be oversold).
 
 ## Demo logins
 
@@ -24,37 +49,44 @@ Password for **every** account: `12345678`
 | Role | Email | Notes |
 |---|---|---|
 | Admin | `admin@tamasha.et` | Review queue, organizers, users, reports |
-| Organizer (verified) | `dawit@tamasha.et` | Abay Sound Collective. Flagship event, a live event for check-in, a draft |
-| Organizer (verified) | `hanna@tamasha.et` | Zema Events. Comedy, supper club, film (rescheduled), market, run |
-| Organizer (verified) | `liya@tamasha.et` | Skylight Jazz Club (event flagged "venue changed after sales") |
-| Organizer (unverified) | `selamawit@tamasha.et` | Birhan Studio (sold-out event with waitlist, cancelled event) |
-| Organizer (unverified) | `yonas@tamasha.et` | Events need admin approval before going live |
-| Attendee | `meron@tamasha.et` | Upcoming, past, refunded tickets; a guest ticket not yet named; a rescheduled event |
+| Organizer (verified) | `dawit@tamasha.et` | Abay Sound Collective: flagship event, a live event for check-in, a draft |
+| Organizer (verified) | `hanna@tamasha.et` | Zema Events: comedy, supper club, film (rescheduled), market, run |
+| Organizer (verified) | `liya@tamasha.et` | Skylight Jazz Club |
+| Organizer (unverified) | `selamawit@tamasha.et`, `yonas@tamasha.et` | Their events need admin approval |
+| Attendee | `meron@tamasha.et` | Upcoming, past, refunded tickets; an unnamed guest ticket; a rescheduled event |
 | Attendee | `abel@tamasha.et`, `hiwot@tamasha.et` | Smaller ticket lists |
-| Suspended attendee | `suspended@tamasha.et` | Cannot sign in |
 
-Also seeded: `bereket@`, `mesfin@`, `kaleb@tamasha.et` (organizers whose events sit in the admin review queue) and ~190 background attendees (`first.last#@example.com`).
+## Backend layout
 
-## Try the two core flows
+```
+backend/
+  prisma/            schema.prisma, migrations/, seed.ts
+  src/
+    server.ts        starts the HTTP server
+    app.ts           Express app: CORS, JSON, cookies, session, routes, error handling
+    config/env.ts    validated environment (the only place process.env is read)
+    routes/          URL → controller wiring, plus which roles may call what
+    controllers/     thin HTTP layer: validate input, call a service, shape the response
+    validation/      zod schemas for every request body
+    services/        all business rules: holds, orders, refunds, check-in, analytics, moderation…
+    middleware/      session → req.user, role guards, JSON-only mutations, error handler
+    db/prisma.ts     the single Prisma client
+    utils/           errors, constants, formatting, phone and code helpers
+  tests/             unit tests and a PostgreSQL integration test
+```
 
-**Attendee:** `/` → pick an event → choose tickets → *Get tickets* → checkout (new buyers create their account inline) → pay → confirmation → *Open my tickets* → QR ticket.
-Payment is simulated: a mobile-money number ending in `0000` shows the "prompt timed out, no money taken" state; anything else succeeds.
+Rules of the road: controllers never touch the database, services never touch `req`/`res`, and every route is guarded in `routes/index.ts` (`requireAuth`, `requireOrganizer`) with ownership re-checked in services.
 
-**Organizer:** sign in as `dawit@tamasha.et` → *Create event* → basics → when and where → tickets → event page → *Publish* (verified organizers go live; unverified go to admin review) → *Attendees* → check people in, or *Open door scanner* on a phone (camera QR scan, manual code entry, find by name, undo).
+Key behaviours: 10-minute ticket holds protected by a row lock (`SELECT … FOR UPDATE` on the event), a 5% platform fee included in the buyer's price, instant refunds inside the organizer's window (otherwise a request the organizer decides), event cancellation refunding everyone, and compare-and-set check-in so two scanners can't admit the same ticket.
 
-## How it fits together
+## API at a glance
 
-- `src/lib/` — domain logic (events, orders, holds, refunds, check-in, analytics, moderation), auth, validation (`zod`), formatting. Pages and API routes stay thin.
-- `src/app/api/**` — JSON REST routes wrapped by `route()` (JSON-only mutations, uniform `{error, code, fields}` errors). Every route re-checks role and ownership against the database.
-- `src/middleware.ts` — redirects signed-out / wrong-role visitors (UX only; real enforcement is in routes and layouts).
-- `src/components/` — reusable UI (`ui/`), layouts, events, tickets, organizer, admin.
-- `prisma/schema.prisma`, `prisma/seed.ts` — data model and Ethiopian seed data (dates are relative to the day you seed).
+`/api/auth/*` sign in/out and the current user · `/api/events` discovery and event pages · `/api/holds`, `/api/orders/:id/*` checkout, payment, refunds · `/api/tickets/*`, `/api/me/tickets` · `/api/organizer/*` events, tickets, attendees, check-in, analytics, orders, payouts · `/api/admin/*` review queue, organizers, users, reports. Errors always look like `{ "error": "…", "code": "…", "fields": { "email": "…" } }`.
 
-Key rules implemented: 10-minute ticket holds with race-safe stock checks, 5% platform fee included in the buyer's price, refunds instant inside the organizer's window (otherwise a request the organizer approves or declines), event cancellation refunds everyone, QR codes encode a random ticket code and check-in is compare-and-set so two scanners can't double-admit.
+## Known limits (out of scope for the MVP)
 
-## Known limits (deliberately out of scope for the MVP)
-
-- **Payments are simulated** (`src/lib/payments.ts`). Plug Chapa / Telebirr / CBE Birr behind the same `charge()` signature; keep card entry on the provider's hosted page.
-- **Email/SMS are logged, not sent** (`src/lib/notify.ts`). Swap in an SMTP / SMS gateway there.
-- Artwork is a set of generated styles, not image upload. Maps are a placeholder with a Google Maps link.
-- Add rate limiting at the edge (login, holds) before going public. SQLite is for development; point `DATABASE_URL` at Postgres and change the datasource provider for production.
+- **Payments are simulated** (`backend/src/services/payments.service.ts`): a mobile-money number ending in `0000` fails, anything else succeeds. Implement `charge()` against Chapa / Telebirr / CBE Birr and keep card entry on the provider's hosted page.
+- **Email and SMS are only logged** (`backend/src/services/notify.service.ts`). Swap in an SMTP or SMS gateway there.
+- Artwork is a set of generated styles, not image upload; the venue map is a placeholder with a Google Maps link.
+- Add rate limiting (login, holds) at the edge or with a small middleware before going public.
+- Frontend response types in `frontend/src/lib/types.ts` are hand-maintained copies of the API shapes.
